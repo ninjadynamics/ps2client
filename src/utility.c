@@ -85,7 +85,7 @@
 
   // Print out the ps2client usage string.
   printf("\n");
-  printf(" Usage: ps2client [-h hostname] [-t timeout] <command> [arguments]\n\n");
+  printf(" Usage: ps2client [-h hostname] [-t timeout] [--decode module] <command> [arguments]\n\n");
   printf(" Available commands:\n\n");
   printf("   reset\n");
   printf("   execiop <filename> [arguments]\n");

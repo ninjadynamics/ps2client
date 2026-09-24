@@ -6,6 +6,7 @@
  #include "utility.h"
  #include "ps2link.h"
  #include "network.h"
+ #include "telemetry.h"
 
  char hostname[256] = { "192.168.0.10" };
 
@@ -41,6 +42,17 @@
 
    }
 
+   // Else, if an optional telemetry decoder module has been specified...
+   else if (strcmp(argv[loop0], "--decode") == 0) { loop0++;
+
+    // Check to make sure a module path was actually supplied.
+    if (argc == loop0) { printf("Error: No module was supplied the '--decode' option.\n"); print_usage(); return -1; }
+
+    // A missing or incompatible module is reported and ignored.
+    telemetry_load_decoder(argv[loop0]);
+
+   }
+
    // Else, if an optional timeout has been specified...
    else if (strncmp(argv[loop0], "-t", 2) == 0) { loop0++;
 
@@ -73,7 +85,7 @@
   if (ps2link_connect(hostname) < 0) { printf("Error: Could not connect to the ps2link server. (%s)\n", hostname); return -1; }
 
   // Perform the requested command.
-  if (strcmp(argv[-1], "reset")    == 0) { ps2link_command_reset(); timeout = 0;                            } else
+  if (strcmp(argv[-1], "reset")    == 0) { if (ps2link_command_reset() < 0) { ps2link_disconnect(); return 1; } timeout = 0; } else
   if (strcmp(argv[-1], "execiop")  == 0) { ps2link_command_execiop(argc, argv);                             } else
   if (strcmp(argv[-1], "execee")   == 0) { if (ps2link_command_execee(argc, argv) < 0) { ps2link_disconnect(); return 1; } } else
   if (strcmp(argv[-1], "poweroff") == 0) { ps2link_command_poweroff(); timeout = 0;                         } else

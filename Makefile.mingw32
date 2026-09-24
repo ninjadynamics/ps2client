@@ -35,6 +35,11 @@
 	@mkdir -p obj
 	$(CC) $(INC) -c src/utility.c -o obj/utility.o
 
+ OFILES += obj/telemetry.o
+ obj/telemetry.o: src/telemetry.c src/telemetry.h src/dctool-telemetry.h
+	@mkdir -p obj
+	$(CC) $(INC) -c src/telemetry.c -o obj/telemetry.o
+
  #####################
  ## CLIENT PROGRAMS ##
  #####################

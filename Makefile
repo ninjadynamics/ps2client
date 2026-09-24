@@ -15,7 +15,7 @@
   ifeq ($(OS),Windows_NT)
    LIBS = -lwsock32
   else
-   LIBS = -lpthread
+   LIBS = -lpthread -ldl
   endif
 
   ifeq "x$(PREFIX)" "x"
@@ -63,6 +63,11 @@
   obj/utility.o: src/utility.c src/utility.h
 	@mkdir -p obj
 	$(CC) $(CFLAGS) -c src/utility.c -o obj/utility.o
+
+  OFILES += obj/telemetry.o
+  obj/telemetry.o: src/telemetry.c src/telemetry.h src/dctool-telemetry.h
+	@mkdir -p obj
+	$(CC) $(CFLAGS) -c src/telemetry.c -o obj/telemetry.o
 
  #####################
  ## CLIENT PROGRAMS ##

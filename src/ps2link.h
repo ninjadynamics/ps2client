@@ -31,6 +31,24 @@
  #define PS2LINK_COMMAND_WRITEMEM	0xBABE020C
  #define PS2LINK_COMMAND_IOPEXCEP	0xBABE020D
 
+ // HyperSolar ps2link fork (ninjadynamics/ps2link include/hostlink.h, a
+ // separate copy by design). Stock ps2link never answers VERSION, which
+ // selects the legacy unacknowledged commands.
+ #define PS2LINK_COMMAND_VERSION	0xBABE0210
+ #define PS2LINK_REPLY_VERSION		0xBABE0211
+ #define PS2LINK_COMMAND_EXECEE2	0xBABE0212
+ #define PS2LINK_REPLY_EXECEE2		0xBABE0213
+ #define PS2LINK_COMMAND_RESET2		0xBABE0214
+ #define PS2LINK_REPLY_RESET2		0xBABE0215
+
+ #define PS2LINK_FEATURE_EXECEE2	0x00000001
+ #define PS2LINK_FEATURE_RESET2		0x00000002
+
+ #define PS2LINK_EXEC_STARTED		0
+ #define PS2LINK_EXEC_BUSY		1
+ #define PS2LINK_EXEC_LOAD_FAILED	2
+ #define PS2LINK_EXEC_START_FAILED	3
+
  int ps2link_command_reset(void);
 
  int ps2link_command_execiop(int argc, char **argv);
@@ -153,5 +171,7 @@
  void *ps2link_thread_console(void *thread_id);
 
  void *ps2link_thread_request(void *thread_id);
+
+ void *ps2link_thread_telemetry(void *thread_id);
 
 #endif
