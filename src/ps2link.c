@@ -30,6 +30,37 @@
 
  int ps2link_counter = 0;
 
+ // Readiness and delivery bounds. The fileio listener comes up while a reset
+ // ps2link reloads its IOP modules; EXECEE is one UDP datagram with no reply.
+ #define PS2LINK_CONNECT_DEADLINE_MS 15000
+ #define PS2LINK_CONNECT_RETRY_MS    250
+ #define PS2LINK_EXECEE_DEADLINE_MS  15000
+ #define PS2LINK_EXECEE_RETRY_MS     250
+
+ // The first fileio request proves that ps2link executed the EXECEE command.
+ // While that proof is pending, a closed fileio stream belongs to the ps2link
+ // instance being reset, so the request thread reconnects to its successor.
+ pthread_mutex_t ps2link_request_mutex = PTHREAD_MUTEX_INITIALIZER;
+ pthread_cond_t ps2link_request_cond = PTHREAD_COND_INITIALIZER;
+ int ps2link_request_seen = 0;
+ int ps2link_execee_pending = 0;
+
+ static char ps2link_hostname[256];
+
+ // Wall-clock milliseconds: the same clock pthread_cond_timedwait uses.
+ static long long ps2link_now_ms(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
+  return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+ }
+
+ static struct timespec ps2link_ms_to_timespec(long long ms) {
+  struct timespec ts;
+  ts.tv_sec = (time_t)(ms / 1000);
+  ts.tv_nsec = (long)(ms % 1000) * 1000000;
+  return ts;
+ }
+
  // ps2link_dd is now an array of structs
  struct {
     char *pathname; // remember to free when closing dir
@@ -43,32 +74,63 @@
  // PS2LINK FUNCTIONS //
  ///////////////////////
 
- int ps2link_connect(char *hostname) {
+ static int ps2link_connect_request(void) {
+  long long start = ps2link_now_ms();
+  long long waited = 0;
+  int one = 1;
 
-  // Connect to the console port.
-  console_socket = network_listen(0x4712, SOCK_DGRAM);
-
-  // Create the console thread.
-  if (console_socket > 0) { pthread_create(&console_thread_id, NULL, ps2link_thread_console, (void *)&console_thread_id); }
-
-  // Connect to the request port.
-  request_socket = network_connect(hostname, 0x4711, SOCK_STREAM);
+  // A refusal means ps2link is not listening yet (for example while a reset
+  // reloads it), so retry until the deadline.
+  while ((request_socket = network_connect(ps2link_hostname, 0x4711, SOCK_STREAM)) == -2) {
+   waited = ps2link_now_ms() - start;
+   if (waited >= PS2LINK_CONNECT_DEADLINE_MS) { break; }
+   usleep(PS2LINK_CONNECT_RETRY_MS * 1000);
+  }
+  if (request_socket < 0) { fprintf(stderr, "Error: Could not connect to the ps2link fileio port 0x4711 within %d ms.\n", PS2LINK_CONNECT_DEADLINE_MS); return -1; }
+  if (waited > 0) { fprintf(stderr, "ps2client: fileio connected after %d ms of retries.\n", (int)waited); }
 
   // Disable Nagle algorithm: without TCP_NODELAY, the two-part response
   // (small header then data) interacts with PS2's delayed-ACK and causes
   // ~200 ms stall per read() syscall, making fread() ~400x slower than read().
-  if (request_socket > 0) {
-    int one = 1;
-    setsockopt(request_socket, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
-  }
+  setsockopt(request_socket, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
+  return 0;
+ }
+
+ void ps2link_expect_execee(void) {
+
+  // Set before connecting: the reset ps2link can close the stream first.
+  pthread_mutex_lock(&ps2link_request_mutex);
+  ps2link_execee_pending = 1;
+  pthread_mutex_unlock(&ps2link_request_mutex);
+
+ }
+
+ int ps2link_connect(char *hostname) {
+
+  strncpy(ps2link_hostname, hostname, sizeof(ps2link_hostname) - 1);
+
+  // Connect to the console port. A bind failure means another receiver owns it.
+  console_socket = network_listen(0x4712, SOCK_DGRAM);
+  if (console_socket < 0) { fprintf(stderr, "Error: Could not bind the console port 0x4712; is another ps2client running?\n"); return -1; }
+
+  // Give console bursts room while terminal output catches up.
+  { int size = 1 << 20; setsockopt(console_socket, SOL_SOCKET, SO_RCVBUF, (const char *)&size, sizeof(size)); }
+
+  // Create the console thread.
+  pthread_create(&console_thread_id, NULL, ps2link_thread_console, (void *)&console_thread_id);
+
+  // Connect to the request port.
+  if (ps2link_connect_request() < 0) { return -1; }
 
   // Create the request thread.
-  if (request_socket > 0) { pthread_create(&request_thread_id, NULL, ps2link_thread_request, (void *)&request_thread_id); }
+  pthread_create(&request_thread_id, NULL, ps2link_thread_request, (void *)&request_thread_id);
 
   // Connect to the command port.
   command_socket = network_connect(hostname, 0x4712, SOCK_DGRAM);
+  if (command_socket < 0) { fprintf(stderr, "Error: Could not open the ps2link command port 0x4712.\n"); return -1; }
 
-  // Delay for a moment to let ps2link finish setup.
+  // Legacy settling delay for the unacknowledged commands. EXECEE does not
+  // rely on it: it retransmits until ps2link's first fileio request arrives.
   sleep(1);
 
   // End function.
@@ -153,8 +215,43 @@
   command.argc   = htonl(argc);
   fix_argv(command.argv, argv);
 
-  // Send the command packet.
-  return network_send(command_socket, &command, sizeof(command));
+  // EXECEE has no reply, and a datagram sent before a restarted ps2link can
+  // receive it is lost (the target stays on its welcome screen). Loading the
+  // ELF starts with a fileio request, so retransmit the identical command
+  // until one arrives. ps2link runs EE commands in order, so a duplicate
+  // queued behind the load finds the user thread and is rejected. A request
+  // from an already running program also satisfies this wait; that program
+  // rejects EXECEE as before.
+  long long deadline = ps2link_now_ms() + PS2LINK_EXECEE_DEADLINE_MS;
+  int attempts = 0;
+  int seen;
+
+  pthread_mutex_lock(&ps2link_request_mutex);
+  ps2link_request_seen = 0;
+  ps2link_execee_pending = 1;
+  for (;;) {
+   long long now = ps2link_now_ms();
+   struct timespec wake;
+
+   if (now >= deadline) { break; }
+   attempts++;
+   pthread_mutex_unlock(&ps2link_request_mutex);
+   if (network_send(command_socket, &command, sizeof(command)) < 0) { fprintf(stderr, "ps2client: execee send %d failed; retrying.\n", attempts); }
+   pthread_mutex_lock(&ps2link_request_mutex);
+
+   wake = ps2link_ms_to_timespec(now + PS2LINK_EXECEE_RETRY_MS < deadline ? now + PS2LINK_EXECEE_RETRY_MS : deadline);
+   while (!ps2link_request_seen) {
+    if (pthread_cond_timedwait(&ps2link_request_cond, &ps2link_request_mutex, &wake) != 0) { break; }
+   }
+   if (ps2link_request_seen) { break; }
+  }
+  seen = ps2link_request_seen;
+  ps2link_execee_pending = 0;
+  pthread_mutex_unlock(&ps2link_request_mutex);
+
+  if (!seen) { fprintf(stderr, "Error: ps2link did not start execee after %d attempts in %d ms.\n", attempts, PS2LINK_EXECEE_DEADLINE_MS); return -1; }
+  if (attempts > 1) { fprintf(stderr, "ps2client: execee confirmed after %d attempts.\n", attempts); }
+  return 0;
 
  }
 
@@ -823,7 +920,8 @@ int ps2link_response_getstat(int result, unsigned int mode, unsigned int attr, u
  //////////////////////////////
 
  void *ps2link_thread_console(void *thread_id) {
-  char buffer[1024];
+  char buffer[2048];
+  int size;
 
   // If the socket isn't open, this thread isn't needed.
   if (console_socket < 0) { pthread_exit(thread_id); }
@@ -834,14 +932,12 @@ int ps2link_response_getstat(int result, unsigned int mode, unsigned int attr, u
    // Wait for network activity.
    network_wait(console_socket, -1);
 
-   // Receive the console buffer.
-   network_receive(console_socket, buffer, sizeof(buffer));
+   // Receive one console datagram; its length, not a terminator, bounds it.
+   size = network_receive(console_socket, buffer, sizeof(buffer));
+   if (size <= 0) { continue; }
 
    // Print out the console buffer.
-   printf("%s", buffer);
-
-   // Clear the console buffer.
-   memset(buffer, 0, sizeof(buffer));
+   fwrite(buffer, 1, size, stdout);
 
    // Reset the timeout counter.
    ps2link_counter = 0;
@@ -865,11 +961,29 @@ int ps2link_response_getstat(int result, unsigned int mode, unsigned int attr, u
    // Wait for network activity.
    network_wait(request_socket, -1);
 
-   // Read in the request packet header.
-   network_receive_all(request_socket, &packet, 6);
+   // Read in the request packet header and the rest of the packet. A closed
+   // stream means ps2link reset or handed fileio to a newer client.
+   if (network_receive_all(request_socket, &packet, 6) < 0 ||
+       ntohs(packet.length) < 6 || ntohs(packet.length) > sizeof(packet) ||
+       network_receive_all(request_socket, packet.buffer, ntohs(packet.length) - 6) < 0) {
+    int pending;
 
-   // Read in the rest of the packet.
-   network_receive_all(request_socket, packet.buffer, ntohs(packet.length) - 6);
+    // Only a pending EXECEE follows the reset ps2link to its successor;
+    // otherwise reconnecting would take fileio from a newer client.
+    pthread_mutex_lock(&ps2link_request_mutex);
+    pending = ps2link_execee_pending && !ps2link_request_seen;
+    pthread_mutex_unlock(&ps2link_request_mutex);
+    network_disconnect(request_socket);
+    if (pending) { fprintf(stderr, "ps2client: fileio connection closed before execee started; reconnecting.\n"); }
+    if (!pending || ps2link_connect_request() < 0) { fprintf(stderr, "ps2client: fileio connection closed.\n"); break; }
+    continue;
+   }
+
+   // Wake an EXECEE waiting for proof that ps2link started loading.
+   pthread_mutex_lock(&ps2link_request_mutex);
+   ps2link_request_seen = 1;
+   pthread_cond_broadcast(&ps2link_request_cond);
+   pthread_mutex_unlock(&ps2link_request_mutex);
 
    // Perform the requested action.
    if (ntohl(packet.number) == PS2LINK_REQUEST_OPEN)     { ps2link_request_open(&packet);     } else

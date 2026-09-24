@@ -27,17 +27,21 @@
 
  int network_connect(char *hostname, int port, int type) { int sock = -1;
   struct sockaddr_in sockaddr;
+  struct hostent *host;
+
+  // Resolve the hostname.
+  host = gethostbyname(hostname); if (host == NULL) { return -1; }
 
   // Populate the sockaddr structure.
   sockaddr.sin_family = AF_INET;
   sockaddr.sin_port = htons(port);
-  sockaddr.sin_addr = *(struct in_addr *)gethostbyname(hostname)->h_addr;
+  sockaddr.sin_addr = *(struct in_addr *)host->h_addr;
 
   // Open the socket.
   sock = socket(AF_INET, type, 0); if (sock < 0) { return -1; }
 
-  // Connect the socket.
-  if (connect(sock, (struct sockaddr *)&sockaddr, sizeof(struct sockaddr)) < 0) { return -2; }
+  // Connect the socket; a refused connection releases it so callers can retry.
+  if (connect(sock, (struct sockaddr *)&sockaddr, sizeof(struct sockaddr)) < 0) { network_disconnect(sock); return -2; }
 
   // Return the socket.
   return sock;
@@ -65,8 +69,8 @@
 
  int network_send(int sock, void *buffer, int size) { int total = 0;
 
-  // Keep sending data until it has all been sent.
-  while (total < size) { total += send(sock, &((char *)buffer)[total], size - total, 0); }
+  // Keep sending data until it has all been sent or the socket fails.
+  while (total < size) { int sent = send(sock, &((char *)buffer)[total], size - total, 0); if (sent < 0) { return -1; } total += sent; }
 
   // Return the total bytes sent.
   return total;
@@ -102,8 +106,8 @@
 
  int network_receive_all(int sock, void *buffer, int size) { int total = 0;
 
-  // Receive the data from the socket.
-  while (total < size) { total += recvfrom(sock, &((char *)buffer)[total], size - total, 0, NULL, NULL); }
+  // Receive the data from the socket; a closed or failed stream cannot complete it.
+  while (total < size) { int received = recvfrom(sock, &((char *)buffer)[total], size - total, 0, NULL, NULL); if (received <= 0) { return -1; } total += received; }
 
   // Return the total bytes received.
   return total;

@@ -66,13 +66,16 @@
   // Startup network.
   if (network_startup() < 0) { printf("Error: Could not startup network.\n"); return 1; }
 
+  // An EXECEE follows a reset ps2link to its successor until it starts.
+  if (strcmp(argv[-1], "execee") == 0) { ps2link_expect_execee(); }
+
   // Connect to the ps2link server.
   if (ps2link_connect(hostname) < 0) { printf("Error: Could not connect to the ps2link server. (%s)\n", hostname); return -1; }
 
   // Perform the requested command.
   if (strcmp(argv[-1], "reset")    == 0) { ps2link_command_reset(); timeout = 0;                            } else
   if (strcmp(argv[-1], "execiop")  == 0) { ps2link_command_execiop(argc, argv);                             } else
-  if (strcmp(argv[-1], "execee")   == 0) { ps2link_command_execee(argc, argv);                              } else
+  if (strcmp(argv[-1], "execee")   == 0) { if (ps2link_command_execee(argc, argv) < 0) { ps2link_disconnect(); return 1; } } else
   if (strcmp(argv[-1], "poweroff") == 0) { ps2link_command_poweroff(); timeout = 0;                         } else
   if (strcmp(argv[-1], "scrdump")  == 0) { ps2link_command_scrdump(); timeout = 0;                          } else
   if (strcmp(argv[-1], "netdump")  == 0) { ps2link_command_netdump(); timeout = 0;                          } else
