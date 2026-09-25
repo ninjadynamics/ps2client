@@ -16,6 +16,9 @@
 
   // Turn off stdout buffering.
   setbuf(stdout, NULL);
+  // The Windows CRT buffers a redirected stderr; an abnormal exit would drop
+  // the only explanation of the failure.
+  setbuf(stderr, NULL);
 
   // Parse the environment list for optional arguments.
   for (loop0=0; env[loop0]; loop0++) {

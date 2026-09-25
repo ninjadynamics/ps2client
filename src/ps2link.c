@@ -49,6 +49,8 @@
  pthread_mutex_t ps2link_request_mutex = PTHREAD_MUTEX_INITIALIZER;
  pthread_cond_t ps2link_request_cond = PTHREAD_COND_INITIALIZER;
  int ps2link_request_seen = 0;
+ // Fileio requests served so far; EXECEE2 waits while this advances.
+ unsigned long ps2link_request_count = 0;
  int ps2link_execee_pending = 0;
 
  static char ps2link_hostname[256];
@@ -203,9 +205,33 @@
  // also requires the u32 at that offset to equal match_value. Unmatched
  // datagrams (stale replies to earlier retransmissions) are drained. Returns
  // 0 with the reply copied, or -1 at the deadline.
+ // Listen (without sending) until a matching reply arrives or `until` passes.
+ // Unmatched datagrams are drained. Returns 0 with the reply copied, or -1.
+ static int ps2link_await(unsigned int reply_number, void *reply, int reply_size, int match_offset, unsigned int match_value, long long until) {
+  char buffer[512];
+
+  for (;;) {
+   long long wait = until - ps2link_now_ms();
+   struct timeval tv;
+   fd_set fds;
+   int size;
+
+   if (wait <= 0) { return -1; }
+   FD_ZERO(&fds); FD_SET(command_socket, &fds);
+   tv.tv_sec = (long)(wait / 1000); tv.tv_usec = (long)(wait % 1000) * 1000;
+   if (select(command_socket + 1, &fds, NULL, NULL, &tv) <= 0) { return -1; }
+
+   // A refused datagram (ps2link restarting) surfaces here as an error.
+   size = recv(command_socket, buffer, sizeof(buffer), 0);
+   if (size != reply_size || ntohl(*(unsigned int *)buffer) != reply_number) { continue; }
+   if (match_offset > 0) { unsigned int value; memcpy(&value, buffer + match_offset, sizeof(value)); if (ntohl(value) != match_value) { continue; } }
+   memcpy(reply, buffer, reply_size);
+   return 0;
+  }
+ }
+
  static int ps2link_transact(const void *request, int request_size, unsigned int reply_number, void *reply, int reply_size, int match_offset, unsigned int match_value, int deadline_ms, int *attempts) {
   long long deadline = ps2link_now_ms() + deadline_ms;
-  char buffer[512];
 
   *attempts = 0;
   while (ps2link_now_ms() < deadline) {
@@ -213,25 +239,7 @@
 
    ++*attempts;
    network_send(command_socket, (void *)request, request_size);
-   for (;;) {
-    long long now = ps2link_now_ms();
-    long long wait = (retry < deadline ? retry : deadline) - now;
-    struct timeval tv;
-    fd_set fds;
-    int size;
-
-    if (wait <= 0) { break; }
-    FD_ZERO(&fds); FD_SET(command_socket, &fds);
-    tv.tv_sec = (long)(wait / 1000); tv.tv_usec = (long)(wait % 1000) * 1000;
-    if (select(command_socket + 1, &fds, NULL, NULL, &tv) <= 0) { break; }
-
-    // A refused datagram (ps2link restarting) surfaces here as an error.
-    size = recv(command_socket, buffer, sizeof(buffer), 0);
-    if (size != reply_size || ntohl(*(unsigned int *)buffer) != reply_number) { continue; }
-    if (match_offset > 0) { unsigned int value; memcpy(&value, buffer + match_offset, sizeof(value)); if (ntohl(value) != match_value) { continue; } }
-    memcpy(reply, buffer, reply_size);
-    return 0;
-   }
+   if (ps2link_await(reply_number, reply, reply_size, match_offset, match_value, retry < deadline ? retry : deadline) == 0) { return 0; }
   }
   return -1;
  }
@@ -341,9 +349,69 @@
     command2.id = htonl(id);
     command2.argc = command.argc;
     memcpy(command2.argv, command.argv, sizeof(command2.argv));
-    if (ps2link_transact(&command2, sizeof(command2), PS2LINK_REPLY_EXECEE2, &reply2, sizeof(reply2), 6, id, (int)(deadline - ps2link_now_ms()), &attempts) < 0) {
-     fprintf(stderr, "Error: ps2link P%u gen %x did not answer execee after %d attempts.\n", version.marker, version.generation, attempts);
-     return -1;
+    // ps2link replies only after the whole ELF has loaded over fileio, and
+    // the reply can be lost once the program starts. Two phases:
+    //  1. Deliver: retransmit until ps2link answers or its first fileio
+    //     request proves it has the command.
+    //  2. Listen without sending while the load progresses. Retransmitting
+    //     into a starting program floods ps2link's command port and has
+    //     killed its network (fileio closed, console silent, no reset).
+    // A load that ran but was never acknowledged still started the program:
+    // stay attached (detaching strands it without fileio).
+    {
+     unsigned long start, seen;
+     long long retry = 0;
+     int acknowledged = 0;
+
+     pthread_mutex_lock(&ps2link_request_mutex);
+     start = ps2link_request_count;
+     pthread_mutex_unlock(&ps2link_request_mutex);
+     seen = start;
+     attempts = 0;
+     for (;;) {
+      long long now = ps2link_now_ms();
+      if (now >= deadline) { break; }
+      pthread_mutex_lock(&ps2link_request_mutex);
+      seen = ps2link_request_count;
+      pthread_mutex_unlock(&ps2link_request_mutex);
+      if (seen != start) { break; }
+      if (now >= retry) {
+       ++attempts;
+       network_send(command_socket, &command2, sizeof(command2));
+       retry = now + PS2LINK_RETRY_MS;
+      }
+      if (ps2link_await(PS2LINK_REPLY_EXECEE2, &reply2, sizeof(reply2), 6, id, retry < deadline ? retry : deadline) == 0) { acknowledged = 1; break; }
+     }
+     if (!acknowledged && seen == start) {
+      pthread_mutex_lock(&ps2link_request_mutex);
+      ps2link_execee_pending = 0;
+      pthread_mutex_unlock(&ps2link_request_mutex);
+      fprintf(stderr, "Error: ps2link P%u gen %x did not answer or load execee after %d attempts in %d ms.\n", version.marker, version.generation, attempts, PS2LINK_EXECEE_DEADLINE_MS);
+      return -1;
+     }
+     // Phase 2: silent. Each new fileio request re-arms the progress deadline.
+     while (!acknowledged) {
+      unsigned long before = seen;
+      if (ps2link_await(PS2LINK_REPLY_EXECEE2, &reply2, sizeof(reply2), 6, id, ps2link_now_ms() + PS2LINK_EXECEE_DEADLINE_MS) == 0) { acknowledged = 1; break; }
+      pthread_mutex_lock(&ps2link_request_mutex);
+      seen = ps2link_request_count;
+      pthread_mutex_unlock(&ps2link_request_mutex);
+      if (seen == before) { break; }
+     }
+     // The load has gone quiet. ps2link answers a retransmission from the
+     // result it cached for this ID, so ask a few more times, spaced out.
+     for (int ask = 0; !acknowledged && ask < 3; ask++) {
+      ++attempts;
+      network_send(command_socket, &command2, sizeof(command2));
+      if (ps2link_await(PS2LINK_REPLY_EXECEE2, &reply2, sizeof(reply2), 6, id, ps2link_now_ms() + PS2LINK_RETRY_MS) == 0) { acknowledged = 1; }
+     }
+     if (!acknowledged) {
+      pthread_mutex_lock(&ps2link_request_mutex);
+      ps2link_execee_pending = 0;
+      pthread_mutex_unlock(&ps2link_request_mutex);
+      fprintf(stderr, "ps2client: ps2link P%u gen %x loaded the ELF but never acknowledged execee (%d sends); staying attached.\n", version.marker, version.generation, attempts);
+      return 0;
+     }
     }
 
     pthread_mutex_lock(&ps2link_request_mutex);
@@ -1150,6 +1218,7 @@ int ps2link_response_getstat(int result, unsigned int mode, unsigned int attr, u
    // Wake an EXECEE waiting for proof that ps2link started loading.
    pthread_mutex_lock(&ps2link_request_mutex);
    ps2link_request_seen = 1;
+   ++ps2link_request_count;
    pthread_cond_broadcast(&ps2link_request_cond);
    pthread_mutex_unlock(&ps2link_request_mutex);
 
