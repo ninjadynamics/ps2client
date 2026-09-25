@@ -7,7 +7,7 @@
 
  void ps2link_expect_execee(void);
 
- int ps2link_connect(char *hostname);
+ int ps2link_connect(char *hostname, int fileio_optional);
 
  int ps2link_mainloop(int timeout);
 

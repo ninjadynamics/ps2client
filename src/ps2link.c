@@ -30,6 +30,7 @@
 
  pthread_t console_thread_id;
  pthread_t request_thread_id;
+ static int request_thread_started = 0;
  pthread_t telemetry_thread_id;
 
  int ps2link_counter = 0;
@@ -38,10 +39,18 @@
  // ps2link reloads its IOP modules; UDP commands are retransmitted at the
  // retry interval until acknowledged (fork) or proven by fileio (stock).
  #define PS2LINK_RETRY_MS 250
- #define PS2LINK_CONNECT_DEADLINE_MS 15000
+ #define PS2LINK_CONNECT_DEADLINE_MS 60000
+ // Commands that travel on the UDP command port alone (reset) only glance at
+ // fileio: a lost earlier reset can leave ps2link running without it.
+ #define PS2LINK_OPTIONAL_CONNECT_MS 3000
  #define PS2LINK_EXECEE_DEADLINE_MS 15000
  #define PS2LINK_HANDSHAKE_DEADLINE_MS 3000
- #define PS2LINK_RESET_DEADLINE_MS 20000
+ // A reset restarts ps2link's network stack; a switch port that renegotiates
+ // can take 30 s or more to forward again, so readiness gets a long bound.
+ #define PS2LINK_RESET_DEADLINE_MS 60000
+ // An old generation still answering this long after an acknowledged reset
+ // never received it on the EE; the reset is sent again.
+ #define PS2LINK_RESET_RESEND_MS 5000
 
  // The first fileio request proves that ps2link executed the EXECEE command.
  // While that proof is pending, a closed fileio stream belongs to the ps2link
@@ -82,7 +91,7 @@
  // PS2LINK FUNCTIONS //
  ///////////////////////
 
- static int ps2link_connect_request(void) {
+ static int ps2link_connect_request_within(int deadline_ms) {
   long long start = ps2link_now_ms();
   long long waited = 0;
   int one = 1;
@@ -91,10 +100,10 @@
   // reloads it), so retry until the deadline.
   while ((request_socket = network_connect(ps2link_hostname, 0x4711, SOCK_STREAM)) == -2) {
    waited = ps2link_now_ms() - start;
-   if (waited >= PS2LINK_CONNECT_DEADLINE_MS) { break; }
+   if (waited >= deadline_ms) { break; }
    usleep(PS2LINK_RETRY_MS * 1000);
   }
-  if (request_socket < 0) { fprintf(stderr, "Error: Could not connect to the ps2link fileio port 0x4711 within %d ms.\n", PS2LINK_CONNECT_DEADLINE_MS); return -1; }
+  if (request_socket < 0) { fprintf(stderr, "Error: Could not connect to the ps2link fileio port 0x4711 within %d ms.\n", deadline_ms); return -1; }
   if (waited > 0) { fprintf(stderr, "ps2client: fileio connected after %d ms of retries.\n", (int)waited); }
 
   // Disable Nagle algorithm: without TCP_NODELAY, the two-part response
@@ -102,6 +111,10 @@
   // ~200 ms stall per read() syscall, making fread() ~400x slower than read().
   setsockopt(request_socket, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
   return 0;
+ }
+
+ static int ps2link_connect_request(void) {
+  return ps2link_connect_request_within(PS2LINK_CONNECT_DEADLINE_MS);
  }
 
  void ps2link_expect_execee(void) {
@@ -113,7 +126,7 @@
 
  }
 
- int ps2link_connect(char *hostname) {
+ int ps2link_connect(char *hostname, int fileio_optional) {
 
   strncpy(ps2link_hostname, hostname, sizeof(ps2link_hostname) - 1);
 
@@ -136,11 +149,18 @@
    pthread_create(&telemetry_thread_id, NULL, ps2link_thread_telemetry, (void *)&telemetry_thread_id);
   }
 
-  // Connect to the request port.
-  if (ps2link_connect_request() < 0) { return -1; }
+  // Connect to the request port. Without it, only command-port work proceeds.
+  if (fileio_optional) {
+   if (ps2link_connect_request_within(PS2LINK_OPTIONAL_CONNECT_MS) < 0) {
+    fprintf(stderr, "ps2client: continuing without fileio; ps2link commands use the command port.\n");
+   }
+  } else if (ps2link_connect_request() < 0) { return -1; }
 
   // Create the request thread.
-  pthread_create(&request_thread_id, NULL, ps2link_thread_request, (void *)&request_thread_id);
+  if (request_socket >= 0) {
+   pthread_create(&request_thread_id, NULL, ps2link_thread_request, (void *)&request_thread_id);
+   request_thread_started = 1;
+  }
 
   // Connect to the command port.
   command_socket = network_connect(hostname, 0x4712, SOCK_DGRAM);
@@ -176,7 +196,7 @@
 
  int ps2link_disconnect(void) {
   // Kill created threads.
-  pthread_cancel(request_thread_id);
+  if (request_thread_started) { pthread_cancel(request_thread_id); }
   pthread_cancel(console_thread_id);
   if (telemetry_socket >= 0) { pthread_cancel(telemetry_thread_id); network_disconnect(telemetry_socket); }
   
@@ -184,7 +204,7 @@
   if (network_disconnect(command_socket) < 0) { return -1; }
 
   // Disconnect from the request port.
-  if (network_disconnect(request_socket) < 0) { return -1; }
+  if (request_socket >= 0 && network_disconnect(request_socket) < 0) { return -1; }
 
   // Disconnect from console port.
   if (network_disconnect(console_socket) < 0) { return -1; }
@@ -267,6 +287,7 @@
   struct { unsigned int number; unsigned short length; unsigned int generation; unsigned int accepted; } PACKED reply2;
   ps2link_version_t version;
   long long deadline;
+  long long resend;
   unsigned int generation;
   int attempts;
 
@@ -282,21 +303,35 @@
   command2.length = htons(sizeof(command2));
   command2.generation = htonl(generation);
   if (ps2link_transact(&command2, sizeof(command2), PS2LINK_REPLY_RESET2, &reply2, sizeof(reply2), 0, 0, PS2LINK_HANDSHAKE_DEADLINE_MS, &attempts) < 0) {
-   fprintf(stderr, "Error: ps2link P%u (gen %x) did not acknowledge reset.\n", version.marker, generation);
+   fprintf(stderr, "Error: ps2link P%u (boot %u) did not acknowledge reset.\n", version.marker, generation);
    return -1;
   }
 
-  // The restarted ps2link reloads its IOP modules before it can answer.
+  // The restarted ps2link reloads its IOP modules before it can answer. An
+  // IOP that still answers with the old generation after the resend interval
+  // acknowledged the reset but the EE never acted on it (the IOP-to-EE
+  // command can be lost while a program runs): send it again. A repeated
+  // reset only repeats the IOP's unmount and its command to the EE.
   deadline = ps2link_now_ms() + PS2LINK_RESET_DEADLINE_MS;
+  resend = ps2link_now_ms() + PS2LINK_RESET_RESEND_MS;
   while (ps2link_now_ms() < deadline) {
    if (ps2link_version(&version, (int)(deadline - ps2link_now_ms())) < 0) { break; }
    if (version.generation != generation && version.ee_ready) {
-    fprintf(stderr, "ps2client: reset confirmed: ps2link P%u gen %x -> %x.\n", version.marker, generation, version.generation);
+    fprintf(stderr, "ps2client: reset confirmed: ps2link P%u boot %u -> %u.\n", version.marker, generation, version.generation);
     return 0;
+   }
+   if (version.generation == generation && ps2link_now_ms() >= resend) {
+    fprintf(stderr, "ps2client: ps2link boot %u still running; resending reset.\n", generation);
+    if (ps2link_transact(&command2, sizeof(command2), PS2LINK_REPLY_RESET2, &reply2, sizeof(reply2), 0, 0, PS2LINK_HANDSHAKE_DEADLINE_MS, &attempts) == 0 &&
+        !ntohl(reply2.accepted) && ntohl(reply2.generation) != generation) {
+     // The successor answered: the earlier reset took effect meanwhile.
+     continue;
+    }
+    resend = ps2link_now_ms() + PS2LINK_RESET_RESEND_MS;
    }
    usleep(PS2LINK_RETRY_MS * 1000);
   }
-  fprintf(stderr, "Error: ps2link gen %x did not come back ready within %d ms of reset.\n", generation, PS2LINK_RESET_DEADLINE_MS);
+  fprintf(stderr, "Error: ps2link boot %u did not come back ready within %d ms of reset.\n", generation, PS2LINK_RESET_DEADLINE_MS);
   return -1;
 
  }
@@ -338,7 +373,7 @@
 
    if (ps2link_version(&version, PS2LINK_HANDSHAKE_DEADLINE_MS) == 0 && (version.features & PS2LINK_FEATURE_EXECEE2)) {
     while (!version.ee_ready) {
-     if (ps2link_now_ms() >= deadline) { fprintf(stderr, "Error: ps2link P%u gen %x never became ready.\n", version.marker, version.generation); return -1; }
+     if (ps2link_now_ms() >= deadline) { fprintf(stderr, "Error: ps2link P%u boot %u never became ready.\n", version.marker, version.generation); return -1; }
      usleep(PS2LINK_RETRY_MS * 1000);
      if (ps2link_version(&version, (int)(deadline - ps2link_now_ms())) < 0) { fprintf(stderr, "Error: ps2link stopped answering VERSION.\n"); return -1; }
     }
@@ -386,7 +421,7 @@
       pthread_mutex_lock(&ps2link_request_mutex);
       ps2link_execee_pending = 0;
       pthread_mutex_unlock(&ps2link_request_mutex);
-      fprintf(stderr, "Error: ps2link P%u gen %x did not answer or load execee after %d attempts in %d ms.\n", version.marker, version.generation, attempts, PS2LINK_EXECEE_DEADLINE_MS);
+      fprintf(stderr, "Error: ps2link P%u boot %u did not answer or load execee after %d attempts in %d ms.\n", version.marker, version.generation, attempts, PS2LINK_EXECEE_DEADLINE_MS);
       return -1;
      }
      // Phase 2: silent. Each new fileio request re-arms the progress deadline.
@@ -409,7 +444,7 @@
       pthread_mutex_lock(&ps2link_request_mutex);
       ps2link_execee_pending = 0;
       pthread_mutex_unlock(&ps2link_request_mutex);
-      fprintf(stderr, "ps2client: ps2link P%u gen %x loaded the ELF but never acknowledged execee (%d sends); staying attached.\n", version.marker, version.generation, attempts);
+      fprintf(stderr, "ps2client: ps2link P%u boot %u loaded the ELF but never acknowledged execee (%d sends); staying attached.\n", version.marker, version.generation, attempts);
       return 0;
      }
     }
@@ -420,7 +455,7 @@
 
     status = ntohl(reply2.status);
     if (status == PS2LINK_EXEC_STARTED) {
-     fprintf(stderr, "ps2client: execee started on ps2link P%u gen %x%s.\n", version.marker, version.generation, attempts > 1 ? " (retransmitted)" : "");
+     fprintf(stderr, "ps2client: execee started on ps2link P%u boot %u%s.\n", version.marker, version.generation, attempts > 1 ? " (retransmitted)" : "");
      return 0;
     }
     if (status == PS2LINK_EXEC_BUSY) { fprintf(stderr, "Error: ps2link rejected execee: a program is already running; reset first.\n"); }

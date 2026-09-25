@@ -85,7 +85,7 @@
   if (strcmp(argv[-1], "execee") == 0) { ps2link_expect_execee(); }
 
   // Connect to the ps2link server.
-  if (ps2link_connect(hostname) < 0) { printf("Error: Could not connect to the ps2link server. (%s)\n", hostname); return -1; }
+  if (ps2link_connect(hostname, strcmp(argv[-1], "reset") == 0) < 0) { printf("Error: Could not connect to the ps2link server. (%s)\n", hostname); return -1; }
 
   // Perform the requested command.
   if (strcmp(argv[-1], "reset")    == 0) { if (ps2link_command_reset() < 0) { ps2link_disconnect(); return 1; } timeout = 0; } else
