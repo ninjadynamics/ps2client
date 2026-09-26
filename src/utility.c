@@ -85,7 +85,11 @@
 
   // Print out the ps2client usage string.
   printf("\n");
-  printf(" Usage: ps2client [-h hostname] [-t timeout] [--decode module] <command> [arguments]\n\n");
+  printf(" Usage: ps2client [-h hostname] [-t timeout] [--decode module] [--input module] <command> [arguments]\n\n");
+  printf(" --input keyboard streams controller input to a program started with execee or\n");
+  printf(" attached with listen (ps2link P4). A bare name loads ps2-input-<name>.so;\n");
+  printf(" repeat --input to combine modules. While streaming, 127.0.0.1:18199 takes\n");
+  printf(" list, load <module>, unload <module> and reload <module> (one per datagram).\n\n");
   printf(" Available commands:\n\n");
   printf("   reset\n");
   printf("   execiop <filename> [arguments]\n");

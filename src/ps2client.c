@@ -7,6 +7,7 @@
  #include "ps2link.h"
  #include "network.h"
  #include "telemetry.h"
+ #include "input.h"
 
  char hostname[256] = { "192.168.0.10" };
 
@@ -56,6 +57,17 @@
 
    }
 
+   // Else, if an optional network input module has been specified...
+   else if (strcmp(argv[loop0], "--input") == 0) { loop0++;
+
+    // Check to make sure a module name was actually supplied.
+    if (argc == loop0) { printf("Error: No module was supplied the '--input' option.\n"); print_usage(); return -1; }
+
+    // Controlling the console was requested explicitly: a missing module is an error.
+    if (input_load_module(argv[loop0]) < 0) { return -1; }
+
+   }
+
    // Else, if an optional timeout has been specified...
    else if (strncmp(argv[loop0], "-t", 2) == 0) { loop0++;
 
@@ -87,10 +99,16 @@
   // Connect to the ps2link server.
   if (ps2link_connect(hostname, strcmp(argv[-1], "reset") == 0) < 0) { printf("Error: Could not connect to the ps2link server. (%s)\n", hostname); return -1; }
 
+  // A running program can be driven over the network while ps2client stays
+  // attached. The stream starts before EXECEE: its reply can arrive long
+  // after the program runs, and ps2link drops input until the program
+  // registers, so nothing early reaches the wrong program.
+  if ((strcmp(argv[-1], "execee") == 0 || strcmp(argv[-1], "listen") == 0) && input_start(hostname) < 0) { ps2link_disconnect(); return 1; }
+
   // Perform the requested command.
   if (strcmp(argv[-1], "reset")    == 0) { if (ps2link_command_reset() < 0) { ps2link_disconnect(); return 1; } timeout = 0; } else
   if (strcmp(argv[-1], "execiop")  == 0) { ps2link_command_execiop(argc, argv);                             } else
-  if (strcmp(argv[-1], "execee")   == 0) { if (ps2link_command_execee(argc, argv) < 0) { ps2link_disconnect(); return 1; } } else
+  if (strcmp(argv[-1], "execee")   == 0) { if (ps2link_command_execee(argc, argv) < 0) { input_stop(); ps2link_disconnect(); return 1; } } else
   if (strcmp(argv[-1], "poweroff") == 0) { ps2link_command_poweroff(); timeout = 0;                         } else
   if (strcmp(argv[-1], "scrdump")  == 0) { ps2link_command_scrdump(); timeout = 0;                          } else
   if (strcmp(argv[-1], "netdump")  == 0) { ps2link_command_netdump(); timeout = 0;                          } else
@@ -108,6 +126,9 @@
 
   // Enter the main loop.
   ps2link_mainloop(timeout);
+
+  // Release the controls before detaching.
+  input_stop();
 
   // Disconnect from the ps2link server.
   ps2link_disconnect();
