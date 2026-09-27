@@ -115,7 +115,7 @@ Listen to the ps2link network console.
 
 ### NETWORK CONTROLLER INPUT (ps2link P4 fork)
 
-`--input <module>` streams controller state to a program started with `execee` or attached with `listen`. Repeat it to combine modules (buttons combine, each stick axis takes the most deflected source, each trigger the strongest). A bare name loads `input-<name>.so` beside ps2client, then from the working directory. The stream starts before `execee`; ps2link drops input until the program registers its record (see `include/hostlink.h` in the ps2link fork).
+`--input <module>` streams controller state to a program started with `execee` or attached with `listen`. Repeat it to combine modules (buttons combine, each stick axis takes the most deflected source, each trigger the strongest). A bare name loads `input-<name>.so` beside ps2client, then from the working directory. The stream starts before `execee`; ps2link drops input until the program registers its record (see `include/hostlink.h` in the ps2link fork). `--input none` streams a released pad with no module: a carrier for control commands, such as `go`, which sets the sync-GO flag (bit 1) on every datagram for 500 ms (HyperSolar's synchronized `make multi-hw` start).
 
 Modules (`input/`, built by `make -f Makefile.mingw32 input`):
 
