@@ -115,15 +115,15 @@ Listen to the ps2link network console.
 
 ### NETWORK CONTROLLER INPUT (ps2link P4 fork)
 
-`--input <module>` streams controller state to a program started with `execee` or attached with `listen`. Repeat it to combine modules (buttons combine, each stick axis takes the most deflected source, each trigger the strongest). A bare name loads `ps2-input-<name>.so` beside ps2client, then from the working directory. The stream starts before `execee`; ps2link drops input until the program registers its record (see `include/hostlink.h` in the ps2link fork).
+`--input <module>` streams controller state to a program started with `execee` or attached with `listen`. Repeat it to combine modules (buttons combine, each stick axis takes the most deflected source, each trigger the strongest). A bare name loads `input-<name>.so` beside ps2client, then from the working directory. The stream starts before `execee`; ps2link drops input until the program registers its record (see `include/hostlink.h` in the ps2link fork).
 
 Modules (`input/`, built by `make -f Makefile.mingw32 input`):
 
 *   `keyboard`: arrows = D-pad, WASD / IJKL = sticks, 1 2 3 = L1 L2 L3, 8 9 0 = R1 R2 R3, Z X , . = square cross circle triangle, Enter = START, Backspace = SELECT.
 *   `gamepad`: any SDL3 controller (DualSense and DualShock over USB or Bluetooth, Xbox, ...) by button position, with analog triggers and hot-plugging. SDL3 is linked statically from `lib/SDL3`, which is not committed: `lib/sdl3.version` pins the MSYS2 package, `sh lib/update-sdl3.sh [version]` refreshes it, and the Makefile fetches the pinned copy when it is missing.
-*   `bridge`: local programs send full controller states to UDP `127.0.0.1:18198` (`PS2_INPUT_BRIDGE_PORT`). `input/bridge.py` is the client: `press`, `tour`, and named maneuvers from a per-project CSV (`--file`, `PS2_INPUT_MANEUVERS`).
+*   `bridge`: local programs send full controller states to UDP `127.0.0.1:18198` (`INPUT_BRIDGE_PORT`). `input/bridge.py` is the client: `press`, `tour`, and named maneuvers from a per-project CSV (`--file`, `PS2_INPUT_MANEUVERS`).
 
-While streaming, `127.0.0.1:18199` (`PS2_INPUT_CONTROL_PORT`) takes `list`, `load <module>`, `unload <module>` and `reload <module>`, one per datagram (`python input/bridge.py module ...`). Module ABI: `src/ps2link-input.h`.
+While streaming, `127.0.0.1:18199` (`INPUT_CONTROL_PORT`) takes `list`, `load <module>`, `unload <module>` and `reload <module>`, one per datagram (`python input/bridge.py module ...`). Module ABI: `src/ps2link-input.h`.
 
 ## Community
 

@@ -43,7 +43,7 @@ static void open_first(void)
         pad = SDL_OpenGamepad(ids[i]);
     SDL_free(ids);
     if (pad)
-        fprintf(stderr, "ps2-input-gamepad: using %s\n", SDL_GetGamepadName(pad));
+        fprintf(stderr, "input-gamepad: using %s\n", SDL_GetGamepadName(pad));
 }
 
 static int gamepad_start(void)
@@ -75,20 +75,20 @@ static int gamepad_poll(ps2_input_state_t *state)
         /* No window: controllers must report while another app has focus. */
         SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
         if (!SDL_Init(SDL_INIT_GAMEPAD)) {
-            fprintf(stderr, "ps2-input-gamepad: SDL_Init failed: %s\n", SDL_GetError());
+            fprintf(stderr, "input-gamepad: SDL_Init failed: %s\n", SDL_GetError());
             return -1;
         }
         sdl_ready = 1;
         open_first();
         if (!pad)
-            fprintf(stderr, "ps2-input-gamepad: waiting for a controller\n");
+            fprintf(stderr, "input-gamepad: waiting for a controller\n");
     }
 
     /* Pumps the controllers and reports hot-plugging. */
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_EVENT_GAMEPAD_REMOVED && pad &&
             event.gdevice.which == SDL_GetGamepadID(pad)) {
-            fprintf(stderr, "ps2-input-gamepad: %s disconnected\n", SDL_GetGamepadName(pad));
+            fprintf(stderr, "input-gamepad: %s disconnected\n", SDL_GetGamepadName(pad));
             SDL_CloseGamepad(pad);
             pad = NULL;
             open_first();

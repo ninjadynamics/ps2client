@@ -70,7 +70,7 @@
 	$(CC) $(CFLAGS) -c src/telemetry.c -o obj/telemetry.o
 
   OFILES += obj/input.o
-  obj/input.o: src/input.c src/input.h src/ps2link-input.h src/network.h
+  obj/input.o: src/input.c src/input.h src/ps2link-input.h
 	@mkdir -p obj
 	$(CC) $(CFLAGS) -c src/input.c -o obj/input.o
 

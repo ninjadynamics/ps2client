@@ -5,13 +5,15 @@
  #include <time.h>
  #include <unistd.h>
  #include <pthread.h>
- #include "network.h"   // winsock2.h must precede windows.h
 #ifdef _WIN32
+ #include <winsock2.h>  // must precede windows.h
  #include <windows.h>
 #else
  #include <dlfcn.h>
+ #include <netdb.h>
  #include <netinet/in.h>
  #include <sys/select.h>
+ #include <sys/socket.h>
 #endif
  #include "ps2link-input.h"
  #include "input.h"
@@ -32,11 +34,13 @@
  // While streaming, a loopback control port loads, unloads and reloads
  // modules by text command (see input.h).
  #define INPUT_MAX_MODULES    8
- #define INPUT_CONTROL_PORT   0x4717
+ #ifndef INPUT_CONTROL_DEFAULT_PORT   // one per client, so tandem clients coexist
+ #define INPUT_CONTROL_DEFAULT_PORT 0x4717
+ #endif
  #define INPUT_CONTROL_WAIT_MS 100
 
  typedef struct {
-  char label[64];                       // "gamepad" for ps2-input-gamepad.so
+  char label[64];                       // "gamepad" for input-gamepad.so
   char path[1024 + 64];                 // as resolved, for reload
   void *handle;
   const ps2_input_module_v1_t *api;
@@ -56,6 +60,31 @@
  ///////////////////////////////
  // NETWORK INPUT FUNCTIONS //
  ///////////////////////////////
+
+ // This file is shared verbatim by ps2client and dc-tool-ip; it owns its
+ // sockets (the client has started Winsock).
+ static void input_socket_close(int sock) {
+#ifdef _WIN32
+  closesocket(sock);
+#else
+  close(sock);
+#endif
+ }
+
+ static int input_connect(const char *hostname, int port) {
+  struct hostent *host = gethostbyname(hostname);
+  struct sockaddr_in addr;
+  int sock;
+  if (!host) { return -1; }
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr = *(struct in_addr *)host->h_addr;
+  sock = (int)socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock < 0) { return -1; }
+  if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) { input_socket_close(sock); return -1; }
+  return sock;
+ }
 
  static void *input_open(const char *path) {
 #ifdef _WIN32
@@ -83,17 +112,17 @@
   return get ? get() : NULL;
  }
 
- // "lib/ps2-input-gamepad.so" and "gamepad" both name "gamepad".
+ // "lib/input-gamepad.so" and "gamepad" both name "gamepad".
  static void input_label(const char *name, char *label, size_t size) {
   const char *base = name, *p;
   for (p = name; *p; p++) { if (*p == '/' || *p == '\\') { base = p + 1; } }
-  if (strncmp(base, "ps2-input-", 10) == 0) { base += 10; }
+  if (strncmp(base, "input-", 6) == 0) { base += 6; }
   snprintf(label, size, "%s", base);
   size_t n = strlen(label);
   if (n > 3 && strcmp(label + n - 3, ".so") == 0) { label[n - 3] = 0; }
  }
 
- // A path is used as given; a bare name is "ps2-input-<name>.so" beside this
+ // A path is used as given; a bare name is "input-<name>.so" beside this
  // executable, then in the working directory.
  static void *input_resolve(const char *name, char *path, size_t size) {
   void *handle;
@@ -102,9 +131,9 @@
 #ifdef _WIN32
   char exe[1024]; DWORD n = GetModuleFileNameA(NULL, exe, sizeof(exe));
   char *slash = (n > 0 && n < sizeof(exe)) ? strrchr(exe, '\\') : NULL;
-  if (slash) { *slash = 0; snprintf(path, size, "%s\\ps2-input-%s.so", exe, name); if ((handle = input_open(path))) { return handle; } }
+  if (slash) { *slash = 0; snprintf(path, size, "%s\\input-%s.so", exe, name); if ((handle = input_open(path))) { return handle; } }
 #endif
-  snprintf(path, size, "ps2-input-%s.so", name);
+  snprintf(path, size, "input-%s.so", name);
   return input_open(path);
  }
 
@@ -158,8 +187,8 @@
  int input_load_module(const char *name) {
   char msg[1200];
   input_requested = 1;
-  if (input_add(name, msg, sizeof(msg)) < 0) { fprintf(stderr, "ps2client: %s.\n", msg); return -1; }
-  fprintf(stderr, "ps2client: input %s\n", msg);
+  if (input_add(name, msg, sizeof(msg)) < 0) { fprintf(stderr, "input: %s.\n", msg); return -1; }
+  fprintf(stderr, "input: %s\n", msg);
   return 0;
  }
 
@@ -167,7 +196,7 @@
   uint8_t packet[PS2LINK_INPUT_V1_SIZE];
   const uint32_t size = ps2link_input_encode_v1(packet, input_session, ++input_sequence, state, INPUT_VALID_MS, flags);
 
-  network_send(input_socket, packet, (int)size);
+  send(input_socket, (const char *)packet, (int)size, 0);
  }
 
  static uint32_t input_now_ms(void) {
@@ -199,11 +228,11 @@
    ps2_input_state_t state;
    if (!slot->api) { continue; }
    if (!slot->started) {
-    if (slot->api->start() != 0) { fprintf(stderr, "ps2client: input module %s failed to start; unloaded.\n", slot->label); input_remove(slot); continue; }
+    if (slot->api->start() != 0) { fprintf(stderr, "input: module %s failed to start; unloaded.\n", slot->label); input_remove(slot); continue; }
     slot->started = 1;
    }
    input_released(&state);
-   if (slot->api->poll(&state) < 0) { fprintf(stderr, "ps2client: input module %s stopped; unloaded.\n", slot->label); input_remove(slot); continue; }
+   if (slot->api->poll(&state) < 0) { fprintf(stderr, "input: module %s stopped; unloaded.\n", slot->label); input_remove(slot); continue; }
    merged->buttons |= state.buttons;
    merged->lx = input_axis(merged->lx, state.lx);
    merged->ly = input_axis(merged->ly, state.ly);
@@ -267,7 +296,7 @@
    snprintf(reply, size, "error: commands are list, load <module>, unload <module>, reload <module>");
   }
   pthread_mutex_unlock(&input_lock);
-  fprintf(stderr, "ps2client: input control: %s%s", reply, reply[0] && reply[strlen(reply) - 1] == '\n' ? "" : "\n");
+  fprintf(stderr, "input: control: %s%s", reply, reply[0] && reply[strlen(reply) - 1] == '\n' ? "" : "\n");
  }
 
  static void *input_control_thread(void *arg) {
@@ -298,30 +327,30 @@
 
  // Loopback only: the control port must not be reachable from the network.
  static void input_control_open(void) {
-  const char *env = getenv("PS2_INPUT_CONTROL_PORT");
-  const int port = env ? atoi(env) : INPUT_CONTROL_PORT;
+  const char *env = getenv("INPUT_CONTROL_PORT");
+  const int port = env ? atoi(env) : INPUT_CONTROL_DEFAULT_PORT;
   struct sockaddr_in addr;
 
-  input_control_socket = socket(AF_INET, SOCK_DGRAM, 0);
+  input_control_socket = (int)socket(AF_INET, SOCK_DGRAM, 0);
   if (input_control_socket < 0) { return; }
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   if (bind(input_control_socket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-   fprintf(stderr, "ps2client: input control port %d unavailable; modules are fixed for this session.\n", port);
-   network_disconnect(input_control_socket);
+   fprintf(stderr, "input: control port %d unavailable; modules are fixed for this session.\n", port);
+   input_socket_close(input_control_socket);
    input_control_socket = -1;
    return;
   }
-  fprintf(stderr, "ps2client: input control on 127.0.0.1:%d (list, load, unload, reload).\n", port);
+  fprintf(stderr, "input: control on 127.0.0.1:%d (list, load, unload, reload).\n", port);
  }
 
  int input_start(const char *hostname) {
   if (!input_requested) { return 0; }
-  input_socket = network_connect((char *)hostname, PS2LINK_INPUT_PORT, SOCK_DGRAM);
-  if (input_socket < 0) { fprintf(stderr, "ps2client: could not open the input port 0x%x.\n", PS2LINK_INPUT_PORT); return -1; }
-  // A new session supersedes any earlier ps2client's stream on the console.
+  input_socket = input_connect(hostname, PS2LINK_INPUT_PORT);
+  if (input_socket < 0) { fprintf(stderr, "input: could not open the input port 0x%x.\n", PS2LINK_INPUT_PORT); return -1; }
+  // A new session supersedes any earlier client's stream on the console.
   input_session = (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16);
   if (input_session == 0) { input_session = 1; }
   input_running = 1;
@@ -339,7 +368,7 @@
   if (!input_running) { return; }
   input_running = 0;
   pthread_join(input_thread_id, NULL);
-  if (input_control_socket >= 0) { pthread_join(input_control_id, NULL); network_disconnect(input_control_socket); input_control_socket = -1; }
+  if (input_control_socket >= 0) { pthread_join(input_control_id, NULL); input_socket_close(input_control_socket); input_control_socket = -1; }
 #ifdef _WIN32
   timeEndPeriod(1);
 #endif
@@ -347,6 +376,6 @@
   input_released(&released);
   input_send(&released, PS2LINK_INPUT_FLAG_END);
   for (i = 0; i < INPUT_MAX_MODULES; i++) { if (input_slots[i].api) { input_remove(&input_slots[i]); } }
-  network_disconnect(input_socket);
+  input_socket_close(input_socket);
   input_socket = -1;
  }

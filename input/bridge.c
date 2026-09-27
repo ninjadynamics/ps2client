@@ -1,8 +1,9 @@
 /* Bridge input module for ps2client --input bridge (ps2link P4).
  *
  * A local program (an agent, a script, a test) drives the console by sending
- * full controller states as UDP datagrams to 127.0.0.1:PS2_INPUT_BRIDGE_PORT
- * (default 18198 = 0x4716; the environment variable overrides it). The newest
+ * full controller states as UDP datagrams to 127.0.0.1:INPUT_BRIDGE_PORT
+ * (default 18198 = 0x4716; INPUT_BRIDGE_PORT overrides it, so tandem clients
+ * each run their own bridge). The newest
  * valid state is reported on every poll; ps2client owns pacing, sequencing and
  * the console transport. Bridge datagram v1, 14 bytes, little-endian:
  *    0 magic "PKBR"   4 version (1)   5 flags (0)
@@ -36,11 +37,11 @@ static int bridge_start(void)
     WSADATA wsa;
     struct sockaddr_in addr;
     u_long nonblocking = 1;
-    const char *env = getenv("PS2_INPUT_BRIDGE_PORT");
+    const char *env = getenv("INPUT_BRIDGE_PORT");
     const int port = env ? atoi(env) : BRIDGE_DEFAULT_PORT;
 
     if (port <= 0 || port > 65535) {
-        fprintf(stderr, "ps2-input-bridge: bad PS2_INPUT_BRIDGE_PORT '%s'\n", env);
+        fprintf(stderr, "input-bridge: bad INPUT_BRIDGE_PORT '%s'\n", env);
         return -1;
     }
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
@@ -56,14 +57,14 @@ static int bridge_start(void)
     addr.sin_port = htons((u_short)port);
     if (bind(bridge_socket, (struct sockaddr *)&addr, sizeof(addr)) != 0 ||
         ioctlsocket(bridge_socket, FIONBIO, &nonblocking) != 0) {
-        fprintf(stderr, "ps2-input-bridge: cannot listen on 127.0.0.1:%d\n", port);
+        fprintf(stderr, "input-bridge: cannot listen on 127.0.0.1:%d\n", port);
         closesocket(bridge_socket);
         bridge_socket = INVALID_SOCKET;
         WSACleanup();
         return -1;
     }
     bridge_have_state = 0;
-    fprintf(stderr, "ps2-input-bridge: listening on 127.0.0.1:%d\n", port);
+    fprintf(stderr, "input-bridge: listening on 127.0.0.1:%d\n", port);
     return 0;
 }
 

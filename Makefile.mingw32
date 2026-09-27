@@ -41,7 +41,7 @@
 	$(CC) $(INC) -c src/telemetry.c -o obj/telemetry.o
 
  OFILES += obj/input.o
- obj/input.o: src/input.c src/input.h src/ps2link-input.h src/network.h
+ obj/input.o: src/input.c src/input.h src/ps2link-input.h
 	@mkdir -p obj
 	$(CC) $(INC) -c src/input.c -o obj/input.o
 
@@ -49,29 +49,29 @@
  ## INPUT MODULES ##
  ###################
 
- # --input <name> loads ps2-input-<name>.so beside ps2client.exe. The gamepad
+ # --input <name> loads input-<name>.so beside ps2client.exe. The gamepad
  # module embeds static SDL3 from lib/SDL3, which is not committed: a missing
  # copy is fetched at the version lib/sdl3.version pins (lib/update-sdl3.sh).
  INPUT_CC = $(CC) -O2 -std=c99 -Wall -Wextra -shared -static-libgcc -static -Isrc
  SDL3 = lib/SDL3
 
- input: bin/ps2-input-keyboard.so bin/ps2-input-gamepad.so bin/ps2-input-bridge.so
+ input: bin/input-keyboard.so bin/input-gamepad.so bin/input-bridge.so
 
- bin/ps2-input-keyboard.so: input/ps2_input_keyboard.c src/ps2link-input.h
+ bin/input-keyboard.so: input/keyboard.c src/ps2link-input.h
 	@mkdir -p bin
-	$(INPUT_CC) -o $@ input/ps2_input_keyboard.c
+	$(INPUT_CC) -o $@ input/keyboard.c
 
- bin/ps2-input-gamepad.so: input/ps2_input_gamepad.c src/ps2link-input.h $(SDL3)/lib/libSDL3.a
+ bin/input-gamepad.so: input/gamepad.c src/ps2link-input.h $(SDL3)/lib/libSDL3.a
 	@mkdir -p bin
-	$(INPUT_CC) -I$(SDL3)/include -o $@ input/ps2_input_gamepad.c $(SDL3)/lib/libSDL3.a $(shell cat $(SDL3)/libs.txt)
+	$(INPUT_CC) -I$(SDL3)/include -o $@ input/gamepad.c $(SDL3)/lib/libSDL3.a $(shell cat $(SDL3)/libs.txt)
 
  # The recipe reads libs.txt when it runs, after this fetch.
  $(SDL3)/lib/libSDL3.a:
 	sh lib/update-sdl3.sh $(shell cat lib/sdl3.version)
 
- bin/ps2-input-bridge.so: input/ps2_input_bridge.c src/ps2link-input.h
+ bin/input-bridge.so: input/bridge.c src/ps2link-input.h
 	@mkdir -p bin
-	$(INPUT_CC) -o $@ input/ps2_input_bridge.c -lws2_32
+	$(INPUT_CC) -o $@ input/bridge.c -lws2_32
 
  .PHONY: input
 

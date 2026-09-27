@@ -28,7 +28,7 @@ square. A buttons cell of '@other' plays the maneuver 'other' in place.
 
 A state is held by resending it at 60 Hz; the bridge releases every control
 500 ms after the last datagram. The datagram layout is documented in
-ps2_input_bridge.c.
+bridge.c.
 """
 import argparse
 import csv
@@ -39,8 +39,8 @@ import struct
 import sys
 import time
 
-PORT = int(os.environ.get("PS2_INPUT_BRIDGE_PORT", 0x4716))
-CONTROL_PORT = int(os.environ.get("PS2_INPUT_CONTROL_PORT", 0x4717))
+PORT = int(os.environ.get("INPUT_BRIDGE_PORT", 0x4716))
+CONTROL_PORT = int(os.environ.get("INPUT_CONTROL_PORT", 0x4717))
 RATE_HZ = 60
 
 BUTTONS = {
@@ -165,7 +165,9 @@ def tour(b):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--port", type=int, default=PORT, help="bridge port (PS2_INPUT_BRIDGE_PORT, default 18198)")
+    p.add_argument("--port", type=int, default=PORT, help="bridge port (INPUT_BRIDGE_PORT, default 18198)")
+    p.add_argument("--control-port", type=int, default=CONTROL_PORT,
+                   help="client control port (INPUT_CONTROL_PORT, default 18199)")
     p.add_argument("--file", default=os.environ.get("PS2_INPUT_MANEUVERS"),
                    help="maneuver file (PS2_INPUT_MANEUVERS)")
     sub = p.add_subparsers(dest="command", required=True)
@@ -189,7 +191,7 @@ def main():
     if a.command == "module":
         if a.action != "list" and not a.name:
             p.error(f"module {a.action} needs a module name")
-        print(control(" ".join(filter(None, (a.action, a.name)))), end="")
+        print(control(" ".join(filter(None, (a.action, a.name))), a.control_port), end="")
         return
 
     if a.command in ("run", "list"):

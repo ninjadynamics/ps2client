@@ -27,7 +27,7 @@
 extern "C" {
 #endif
 
-#define PS2LINK_INPUT_PORT         0x4715
+#define PS2LINK_INPUT_PORT         0x4712  /* ps2link P5 command port; dcload takes any */
 #define PS2LINK_INPUT_MAGIC        "PKIN"
 #define PS2LINK_INPUT_HEADER_SIZE  16u
 #define PS2LINK_INPUT_WIRE_MAX     120u

@@ -12,8 +12,12 @@
  int fix_flags(int flags) { int result = 0;
 
   // Fix the flags.
-  if (flags & 0x0001) { result |= O_RDONLY;           }
-  if (flags & 0x0002) { result |= O_WRONLY | O_TRUNC; } // FIXME: Truncate is needed for some programs.
+  // The access mode is a value, not bits: 3 is read-write. OR-ing the bits
+  // turned O_RDWR into a truncating write-only open that wiped the file
+  // (a memory card image opened for update).
+  if ((flags & 0x0003) == 0x0001) { result |= O_RDONLY;           }
+  if ((flags & 0x0003) == 0x0002) { result |= O_WRONLY | O_TRUNC; } // FIXME: Truncate is needed for some programs.
+  if ((flags & 0x0003) == 0x0003) { result |= O_RDWR;             }
 #ifndef _WIN32
   if (flags & 0x0010) { result |= O_NONBLOCK;         }
 #endif
@@ -87,7 +91,7 @@
   printf("\n");
   printf(" Usage: ps2client [-h hostname] [-t timeout] [--decode module] [--input module] <command> [arguments]\n\n");
   printf(" --input keyboard streams controller input to a program started with execee or\n");
-  printf(" attached with listen (ps2link P4). A bare name loads ps2-input-<name>.so;\n");
+  printf(" attached with listen (ps2link P5). A bare name loads input-<name>.so;\n");
   printf(" repeat --input to combine modules. While streaming, 127.0.0.1:18199 takes\n");
   printf(" list, load <module>, unload <module> and reload <module> (one per datagram).\n\n");
   printf(" Available commands:\n\n");
